@@ -1,45 +1,49 @@
 ## Alt-Text Buddy (Azure + GPT)
-
 Generate concise, high-quality alt text for images. Compare **raw Azure Image Analysis** vs **Azure + GPT reasoning** via a Streamlit UI and FastAPI backend.
-
 ![UI Screenshot](screenshots/ui.png)
+---
 ![Docs Screenshot](screenshots/docs_endpoints.png)
+---
 
 ## Requirements
+See [`requirements.txt`](./requirements.txt). 
 
-See [`requirements.txt`](./requirements.txt).  
 Create and activate a virtual environment, then install:
-
-```bash```
+```
 python -m venv venv
-Windows: venv\Scripts\activate
-macOS/Linux: source venv/bin/activate
-
+# Windows: venv\Scripts\activate
+# macOS/Linux: source venv/bin/activate
 pip install -r requirements.txt
+```
 
 ## Config
 Create .env from the example and fill your keys:
+```
 cp .env.example .env
+```
 
 ## Quick start
-
-# Run backend
+### Run backend
+```
 uvicorn app.main:app --reload --port 8000
-- Health: http://localhost:8000/health
-- Docs:   http://localhost:8000/docs
-
-# Run UI
+# Health: http://localhost:8000/health
+# Docs:   http://localhost:8000/docs
+```
+### Run UI
+```
 streamlit run ui/app.py
-- In the sidebar, set API base: http://localhost:8000
+# In the sidebar, set API base: http://localhost:8000
+```
 
 ## Endpoints
 - POST /analyze → { alt_text, tags, provider }
 - POST /generate → { alt_text, explain_why, tags, provider }
 - POST /inspect → { alt_text, caption, tags, ocr_lines, provider }
 
-# Convention: public responses use alt_text. The internal Azure caption is kept as caption and only exposed via /inspect for debugging.
+Convention: public responses use alt_text. The internal Azure caption is kept as caption and only exposed via /inspect for debugging.
 
 ## Project structure
+```
 alt-text-buddy/
 ├─ app/
 │  ├─ __init__.py
@@ -68,6 +72,7 @@ alt-text-buddy/
 ├─ .env.example
 ├─ LICENSE
 └─ README.md
+```
 
 ## Notes
 - Caching by image hash: backend caches Azure findings in-memory (TTLCache) keyed by SHA-256 of the image bytes to reduce cost/latency across endpoints.
@@ -78,14 +83,14 @@ alt-text-buddy/
   - OCR hit-rate (overlap between Azure READ text and alt text)
 
 ## Roadmap
-✅ Azure Image Analysis + GPT reasoning (this repo)
-⏩ Add providers and compare in the same UI:
+- ✅ Azure Image Analysis + GPT reasoning (this repo)
+- ⏩ Add providers and compare in the same UI:
   - AWS Rekognition (labels + text)
   - Google Vision (labels + text detection)
   - Local LLM (e.g., LLaVA via Ollama)
-⏩ Sidebar metric pickers & weighted scoring
-⏩ One-shot /pipeline endpoint returning all provider results at once
-⏩ Download results (JSON/CSV) for batch evaluation
+- ⏩ Sidebar metric pickers & weighted scoring
+- ⏩ One-shot /pipeline endpoint returning all provider results at once
+- ⏩ Download results (JSON/CSV) for batch evaluation
 
 ## License
 
