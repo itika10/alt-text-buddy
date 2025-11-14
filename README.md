@@ -10,11 +10,10 @@ Generate concise, high-quality alt text for images. Compare **raw Azure Image An
 See [`requirements.txt`](./requirements.txt).  
 Create and activate a virtual environment, then install:
 
-```bash```
+```bash
 python -m venv venv
-# Windows: venv\Scripts\activate
-# macOS/Linux:
-source venv/bin/activate
+Windows: venv\Scripts\activate
+macOS/Linux: source venv/bin/activate
 
 pip install -r requirements.txt
 
