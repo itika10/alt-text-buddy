@@ -11,7 +11,8 @@ st.sidebar.header("API")
 API_BASE = st.sidebar.text_input("API base URL", "http://localhost:8000").rstrip("/")
 
 st.sidebar.header("Providers")
-use_azure_raw = st.sidebar.checkbox("Azure (caption+tags)", value=True)
+use_azure = st.sidebar.checkbox("Azure Vision", value=True)
+use_aws = st.sidebar.checkbox("AWS Rekognition", value=True)
 use_azure_gpt = st.sidebar.checkbox("Azure + GPT (reasoned)", value=True)
 
 st.sidebar.header("Generation options")
@@ -48,15 +49,15 @@ ocr_info = cached_inspect(API_BASE, file.name, file.type, img_bytes) if img_byte
 
 # ---- Generate button ----
 clicked = st.button("Generate")
-if clicked and not (use_azure_raw or use_azure_gpt):
+if clicked and not (use_azure or use_azure_gpt or use_aws):
     st.warning("Select at least one provider on the left.")
 
 elif clicked and file and img_bytes:
     # --- Azure (raw) ---
-    if use_azure_raw:
+    if use_azure:
         with st.spinner("Azure analyzing…"):
             r = requests.post(
-                f"{API_BASE}/analyze",
+                f"{API_BASE}/analyze-azure",
                 files={"image": (file.name, img_bytes, file.type)},
                 timeout=90
             )
@@ -79,9 +80,37 @@ elif clicked and file and img_bytes:
         else:
             st.error(f"Azure error: {r.status_code} - {r.text[:500]}")
 
+    # --- AWS Rekognition ---
+    if use_aws:
+        with st.spinner("AWS Rekognition anlyzing..."):
+            r = requests.post(
+                f"{API_BASE}/analyze-aws",
+                files={"image": (file.name, img_bytes, file.type)},
+                timeout=90
+            )
+
+        if r.ok:
+            out = r.json()
+            render_result(
+                title="AWS Rekognition",
+                alt_text=out.get("alt_text", ""),
+                tags=out.get("tags", [])
+            )
+            if ocr_info:
+                m = compute_metrics(
+                    alt_text=out.get("alt_text", ""),
+                    tags=out.get("tags", []),          # grounding tags from inspect
+                    ocr_lines=ocr_info.get("ocr_lines", []),
+                )
+                render_metrics("Metrics", m)
+        
+        else:
+            st.error(f"AWS error: {r.status_code} - {r.text[:500]}")
+
+
     # --- Azure + GPT (reasoned) ---
     if use_azure_gpt:
-        with st.spinner("Azure + GPT generating…"):
+        with st.spinner("Azure + GPT generating..."):
             r = requests.post(
                 f"{API_BASE}/generate",
                 files={"image": (file.name, img_bytes, file.type)},

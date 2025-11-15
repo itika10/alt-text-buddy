@@ -3,8 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os, json
 from openai import OpenAI
-from app.config import AZURE_VISION_ENDPOINT, AZURE_VISION_KEY, PORT
+from app.config import AZURE_VISION_ENDPOINT, AZURE_VISION_KEY, PORT, AWS_REGION
 from app.providers.azure_vision import AzureVision
+from app.providers.aws_rekognition import AWSRekognition
 from app.gpt.reasoner import build_prompt
 from app.cache import FINDINGS_CACHE
 from app.utils import image_sha256
@@ -22,6 +23,7 @@ app.add_middleware(
 )
 
 vision = AzureVision(AZURE_VISION_ENDPOINT, AZURE_VISION_KEY)
+aws = AWSRekognition(region_name=AWS_REGION)
 
 def get_findings(image_bytes: bytes):
     key = image_sha256(image_bytes)
@@ -35,6 +37,11 @@ class AzureOutput(BaseModel):
     alt_text: str
     tags: list[str]
     provider: str = "azure"
+
+class AWSOutput(BaseModel):
+    alt_text: str
+    tags: list[str]
+    provider: str = "aws"
 
 class ReasonedOutput(BaseModel):
     alt_text: str
@@ -52,11 +59,17 @@ class InspectOutput(BaseModel):
 def health():
     return {"ok": True}
 
-@app.post("/analyze", response_model=AzureOutput)
-async def generate_alt_text(image: UploadFile = File(...)):
+@app.post("/analyze-azure", response_model=AzureOutput)
+async def analyze_azure(image: UploadFile = File(...)):
     image_bytes = await image.read()
     findings = get_findings(image_bytes)
     return {"alt_text":findings.caption, "tags":findings.tags, "provider":"azure"}
+
+@app.post("/analyze-aws", response_model=AWSOutput)
+async def analyze_aws(image: UploadFile = File(...)):
+    image_bytes = await image.read()
+    f = aws.analyse_image(image_bytes)
+    return {"alt_text":f.caption, "tags":f.tags, "provider":"aws"}
 
 @app.post("/generate", response_model=ReasonedOutput)
 async def generate_reasoned_alt_text(
