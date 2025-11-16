@@ -1,25 +1,60 @@
 import os
 import boto3
+from botocore.config import Config
 from .base import VisionFinding
-from dotenv import load_dotenv, find_dotenv
-load_dotenv(find_dotenv())
 
 class AWSRekognition:
     def __init__(self, region_name: str | None = None):
-        self.client = boto3.client("rekognition", region_name=region_name or os.getenv("AWS_REGION"))
 
-    def analyse_image(self, image_bytes: bytes) -> VisionFinding:
-        labels = self.client.detect_labels(Image={"Bytes": image_bytes}, MaxLabels=25, MinConfidence=60)
-        label_names = [l["Name"].lower() for l in labels.get("Labels", [])]
+        cfg = Config(
+            retries={"max_attempts": 4, "mode": "standard"},
+            read_timeout=20,
+            connect_timeout=5,
+        )
+        session = boto3.Session(region_name=region_name or os.getenv("AWS_REGION", "us-east-1"))
+        self.client = session.client("rekognition", config=cfg)
+       
+    def analyze_image(self, image_bytes: bytes) -> VisionFinding:
+        lr = self.client.detect_labels(
+            Image={"Bytes": image_bytes},
+            MaxLabels=25,
+            MinConfidence=60,
+        )
+        labels = lr.get("Labels", [])
+        tags = [l.get("Name", "").lower() for l in labels if l.get("Confidence", 0) >= 60]
 
-        text = self.client.detect_text(Image={"Bytes": image_bytes})
-        ocr_lines = [d["DetectedText"] for d in text.get("TextDetections", []) if d["Type"] == "LINE" and d.get("confidence", 0) >= 70]
+        # naive caption from top labels
+        caption = ", ".join([l.get("Name", "").lower() for l in labels[:3]]) if labels else ""
 
-        caption = ", ".join(label_names[:3]) if label_names else ""
-        print("AWS Rekognition caption:", caption)
-        print("AWS Rekognition labels:", label_names)
-        print("AWS Rekognition OCR lines:", ocr_lines)
+        # ------- Text (OCR) -------
+        tr = self.client.detect_text(Image={"Bytes": image_bytes})
+        ocr_lines: list[str] = []
 
-        return VisionFinding(caption=caption, tags=label_names, ocr_lines=ocr_lines,
-                             meta={"raw_labels": labels, "raw_text": text})
+        # Prefer LINE nodes
+        for det in tr.get("TextDetections", []):
+            if det.get("Type") == "LINE" and det.get("Confidence", 0) >= 70:
+                txt = (det.get("DetectedText") or "").strip()
+                if txt and not txt.isnumeric():
+                    ocr_lines.append(txt)
+
+        # Fallback: build short lines from WORDs when LINEs are missing
+        if not ocr_lines:
+            words = [
+                (det.get("DetectedText") or "").strip()
+                for det in tr.get("TextDetections", [])
+                if det.get("Type") == "WORD" and det.get("Confidence", 0) >= 80
+            ]
+            # chunk WORDs into phrases (~6 words) so GPT gets something meaningful
+            buf, CHUNK = [], 6
+            for w in words:
+                if w and not w.isnumeric():
+                    buf.append(w)
+                    if len(buf) >= CHUNK:
+                        ocr_lines.append(" ".join(buf))
+                        buf = []
+            if buf:
+                ocr_lines.append(" ".join(buf))
+
+        return VisionFinding(caption=caption, tags=tags, ocr_lines=ocr_lines,
+                             meta={"labels_raw": lr, "text_raw": tr})
 

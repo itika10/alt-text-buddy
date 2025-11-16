@@ -36,11 +36,13 @@ streamlit run ui/app.py
 ```
 
 ## Endpoints
-- POST /analyze → { alt_text, tags, provider }
-- POST /generate → { alt_text, explain_why, tags, provider }
-- POST /inspect → { alt_text, caption, tags, ocr_lines, provider }
+- POST /analyze-azure → { alt_text, tags, provider } : Uses Azure Image Analysis (caption + tags). alt_text is the Azure caption.
+- POST /analyze-aws → { alt_text, tags, provider } : Uses AWS Rekognition (labels → tags; text → OCR lines internally). alt_text is a simple label-based caption.
+- POST /reason → { alt_text, explain_why, tags, provider: "gpt" } : Refines alt text with GPT using your CV findings.
+- POST /inspect-azure → { alt_text, tags, ocr_lines, provider }
+- POST /inspect-aws → { alt_text, tags, ocr_lines, provider }
 
-Convention: public responses use alt_text. The internal Azure caption is kept as caption and only exposed via /inspect for debugging.
+Convention: outward-facing JSON uses alt_text. The raw provider caption is used as a hint and exposed only via the /inspect-* endpoints for debugging.
 
 ## Project structure
 ```
@@ -50,12 +52,14 @@ alt-text-buddy/
 │  ├─ main.py              # FastAPI app + endpoints
 │  ├─ config.py            # env loading
 │  ├─ cache.py             # TTL cache for findings (sha256-keyed)
-│  ├─ utils.py             # helpers (image sha256)
+|  ├─ cache_helpers.py     # get_or_run(image_hash, provider) cache wrapper
+│  ├─ utils.py             # misc helpers (image sha256)
+|  ├─ utils_http.py        # upload validation (content type / size)
 │  ├─ providers/
 │  │  ├─ __init__.py
 │  │  ├─ base.py           # VisionFinding dataclass
 │  │  ├─ azure_vision.py   # Azure Image Analysis adapter
-│  │  ├─ aws_rekognition.py # (stub/coming soon)
+│  │  ├─ aws_rekognition.py # AWS Rekognition adapter
 │  │  └─ google_vision.py   # (stub/coming soon)
 │  └─ gpt/
 │     ├─ __init__.py
@@ -64,6 +68,7 @@ alt-text-buddy/
 │  ├─ __init__.py
 │  ├─ app.py               # Streamlit UI
 │  ├─ components.py        # render helpers
+|  ├─ services.py          # 
 │  └─ metrics.py           # phrase-aware metrics
 ├─ screenshots/
 │  ├─ ui.png
@@ -75,19 +80,18 @@ alt-text-buddy/
 ```
 
 ## Notes
-- Caching by image hash: backend caches Azure findings in-memory (TTLCache) keyed by SHA-256 of the image bytes to reduce cost/latency across endpoints.
-- Consistent naming: outward-facing JSON uses alt_text; Azure’s raw caption remains internal and is shown only in /inspect.
-- Metrics: UI computes:
+- Caching: results are cached in-memory (TTL) per image SHA-256 and provider to reduce cost/latency. See cache_helpers.get_or_run.
+- Reasoner: GPT prompt favors brand/product text from OCR and uses tags/caption as context. If OCR is empty, it still produces helpful content (never says “no OCR”).
+- UI debug: toggle “Show debug” in the sidebar to view raw provider and inspect payloads for each run.
+- Metrics: the UI reports
   - character/word counts
   - phrase-aware tag hit-rate (handles multi-word tags like “cream & onion”)
   - OCR hit-rate (overlap between Azure READ text and alt text)
 
 ## Roadmap
 - ✅ Azure Image Analysis + GPT reasoning (this repo)
-- ⏩ Add providers and compare in the same UI:
-  - AWS Rekognition (labels + text)
-  - Google Vision (labels + text detection)
-  - Local LLM (e.g., LLaVA via Ollama)
+- ✅ AWS Rekognition adapter (labels + text)
+- ⏩ Google Vision adapter (labels + text detection)
 - ⏩ Sidebar metric pickers & weighted scoring
 - ⏩ One-shot /pipeline endpoint returning all provider results at once
 - ⏩ Download results (JSON/CSV) for batch evaluation

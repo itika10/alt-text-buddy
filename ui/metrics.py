@@ -19,7 +19,7 @@ def normalize(text: str) -> str:
     t = re.sub(r"\s+", " ", t).strip()
     return t
 
-def tokenize(text: str):
+def tokenize(text: str) -> List[str]:
     """Unigram tokens with stopwords removed."""
     t = normalize(text)
     toks = t.split()
@@ -71,16 +71,11 @@ def compute_metrics(alt_text: str, tags: list[str], ocr_lines: list[str]):
     tag_hit = phrase_hit_rate(tags, alt_tokens)
 
     # OCR tokens: build a light vocabulary and ignore short words/stopwords
-    print(f"OCR lines for metrics: {ocr_lines}")
     ocr_text = " ".join(ocr_lines[:80])
-    print(f"OCR text for metrics: {ocr_text}")
     ocr_tokens_all = tokenize(ocr_text)
-    print(f"OCR tokens for metrics: {ocr_tokens_all}")
     ocr_tokens = [t for t in ocr_tokens_all if len(t) >= 3]
-    print(f"Filtered OCR tokens for metrics: {ocr_tokens}")
     # treat OCR hit as token-level recall of the top-N tokens
     ocr_ref = set(ocr_tokens[:30])
-    print(f"OCR ref tokens for metrics: {ocr_ref}")
     ocr_hit = round(100.0 * len(ocr_ref & set(alt_tokens)) / (len(ocr_ref) or 1), 1)
 
     return {
