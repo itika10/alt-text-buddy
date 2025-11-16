@@ -1,17 +1,18 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
+from typing import List, Optional, Dict, Callable
 import os, json
 from openai import OpenAI
-from app.config import AZURE_VISION_ENDPOINT, AZURE_VISION_KEY, PORT
+from app.config import AZURE_VISION_ENDPOINT, AZURE_VISION_KEY, PORT, AWS_REGION
+from app.providers.base import VisionFinding
 from app.providers.azure_vision import AzureVision
+from app.providers.aws_rekognition import AWSRekognition
 from app.gpt.reasoner import build_prompt
-from app.cache import FINDINGS_CACHE
-from app.utils import image_sha256
+from app.utils_http import read_image_or_raise
+from app.cache_helpers import get_or_run
 
-client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
-
+# --- FastAPI app setup ---
 app = FastAPI(title="Alt Text Buddy", version="1.0.0")
 
 app.add_middleware(
@@ -21,61 +22,130 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# --- Initialize providers and clients ---
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 vision = AzureVision(AZURE_VISION_ENDPOINT, AZURE_VISION_KEY)
+aws = AWSRekognition(region_name=AWS_REGION)
 
-def get_findings(image_bytes: bytes):
-    key = image_sha256(image_bytes)
-    if key in FINDINGS_CACHE:
-        return FINDINGS_CACHE[key]
-    findings = vision.analyze_image(image_bytes)
-    FINDINGS_CACHE[key] = findings
-    return findings
+# --- Cached runners ---
+RUNNERS: Dict[str, Callable[[bytes], VisionFinding]] = {
+    "azure": lambda b: vision.analyze_image(b),
+    "aws":   lambda b: aws.analyze_image(b),
+    # "google": lambda b: google.analyze_image(b),  # later
+}
 
+# --- Pydantic models ---
 class AzureOutput(BaseModel):
     alt_text: str
     tags: list[str]
     provider: str = "azure"
 
+class AWSOutput(BaseModel):
+    alt_text: str
+    tags: list[str]
+    provider: str = "aws"
+
+class ReasonInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    caption: Optional[str] = None  
+    alt_text: Optional[str] = None
+    tags: List[str] = []
+    ocr_lines: List[str] = []
+    use_case: str = "web"
+    tone: str = "neutral"
+    max_len: int = 160
+
 class ReasonedOutput(BaseModel):
     alt_text: str
     explain_why: str
     tags: list[str]
-    provider: str = "azure+gpt"
+    provider: str = "gpt"
 
 class InspectOutput(BaseModel):
     alt_text: str
     tags: list[str]
     ocr_lines: list[str]
-    provider: str = "azure"
+    provider: str
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {
+        "ok": True,
+        "providers": {
+            "azure": bool(os.getenv("AZURE_VISION_KEY") and os.getenv("AZURE_VISION_ENDPOINT")),
+            "aws":   bool(os.getenv("AWS_REGION")),
+        },
+        "model": OPENAI_MODEL,
+        "version": "1.0.0",
+    }
 
-@app.post("/analyze", response_model=AzureOutput)
-async def generate_alt_text(image: UploadFile = File(...)):
-    image_bytes = await image.read()
-    findings = get_findings(image_bytes)
-    return {"alt_text":findings.caption, "tags":findings.tags, "provider":"azure"}
+# --- Azure Vision endpoint ---
+@app.post("/analyze-azure", response_model=AzureOutput)
+async def analyze_azure(image: UploadFile = File(...)):
+    b = await read_image_or_raise(image)
+    try:
+        f = get_or_run("azure", b, RUNNERS)
+    except Exception as e:
+        # redact details but keep a clear message
+        raise HTTPException(status_code=502, detail=f"AWS Rekognition error: {type(e).__name__}")
+    return {"alt_text":f.caption, "tags":f.tags, "provider":"azure"}
 
-@app.post("/generate", response_model=ReasonedOutput)
-async def generate_reasoned_alt_text(
-    image: UploadFile = File(...),
-    use_case: str = Form("web"),
-    tone: str = Form("neutral"),
-    max_len: int = Form(160),
-):
-    image_bytes = await image.read()
-    findings = get_findings(image_bytes)
+# --- AWS Rekognition endpoint ---
+@app.post("/analyze-aws", response_model=AWSOutput)
+async def analyze_aws(image: UploadFile = File(...)):
+    b = await read_image_or_raise(image)
+    try:
+        f = get_or_run("aws", b, RUNNERS)
+    except Exception as e:
+        # redact details but keep a clear message
+        raise HTTPException(status_code=502, detail=f"AWS Rekognition error: {type(e).__name__}")
+    return {"alt_text":f.caption, "tags":f.tags, "provider":"aws"}
+
+# --- Inspection endpoints for OCR + tags ---
+@app.post("/inspect-azure", response_model=InspectOutput)
+async def inspect_azure(image: UploadFile = File(...)):
+    b = await read_image_or_raise(image)
+    try:
+        f = get_or_run("azure", b, RUNNERS)
+    except Exception as e:
+        # redact details but keep a clear message
+        raise HTTPException(status_code=502, detail=f"AWS Rekognition error: {type(e).__name__}")
+    return {
+        "alt_text": f.caption,
+        "tags": f.tags,
+        "ocr_lines": f.ocr_lines,
+        "provider": "azure",
+    }
+
+@app.post("/inspect-aws", response_model=InspectOutput)
+async def inspect_aws(image: UploadFile = File(...)):
+    b = await read_image_or_raise(image)
+    try:
+        f = get_or_run("aws", b, RUNNERS)
+    except Exception as e:
+        # redact details but keep a clear message
+        raise HTTPException(status_code=502, detail=f"AWS Rekognition error: {type(e).__name__}")
+    return {
+        "alt_text": f.caption,
+        "tags": f.tags,
+        "ocr_lines": f.ocr_lines,
+        "provider": "aws",
+    }
+
+# -- GPT Reasoning endpoint ---
+@app.post("/reason", response_model=ReasonedOutput)
+async def reason(payload: ReasonInput):
+    cap = (payload.caption or payload.alt_text or "").strip()
 
     prompt = build_prompt(
-        findings={"caption": findings.caption,
-                  "tags": findings.tags,
-                  "ocr_lines": findings.ocr_lines,
+        findings={"caption": cap,
+                  "tags": payload.tags,
+                  "ocr_lines": payload.ocr_lines,
                   },
-        use_case=use_case,
-        tone=tone,
-        max_len=max_len,
+        use_case=payload.use_case,
+        tone=payload.tone,
+        max_len=payload.max_len,
     )
 
     rsp = client.chat.completions.create(
@@ -84,24 +154,19 @@ async def generate_reasoned_alt_text(
         temperature=0.2,
         response_format={"type": "json_object"},
     )
-    content = rsp.choices[0].message.content
 
-    data = json.loads(content)
+    try:
+        data = json.loads(rsp.choices[0].message.content)
+    except (json.JSONDecodeError, AttributeError, IndexError):
+        data = {
+            "alt_text": (cap or "")[:payload.max_len],
+            "explain_why": "",
+            "tags": payload.tags,
+        }
 
     return {
-        "alt_text": data.get("alt_text", findings.caption),
+        "alt_text": data.get("alt_text", cap),
         "explain_why": data.get("explain_why", ""),
-        "tags": data.get("tags", findings.tags),
-        "provider": "azure+gpt",
-    }
-
-@app.post("/inspect", response_model=InspectOutput)
-async def inspect_image(image: UploadFile = File(...)):
-    image_bytes = await image.read()
-    findings = get_findings(image_bytes)
-    return {
-        "alt_text": findings.caption,
-        "tags": findings.tags,
-        "ocr_lines": findings.ocr_lines,
-        "provider": "azure",
+        "tags": data.get("tags", payload.tags),
+        "provider": "gpt",
     }
