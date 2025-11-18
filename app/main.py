@@ -8,6 +8,7 @@ from app.config import AZURE_VISION_ENDPOINT, AZURE_VISION_KEY, PORT, AWS_REGION
 from app.providers.base import VisionFinding
 from app.providers.azure_vision import AzureVision
 from app.providers.aws_rekognition import AWSRekognition
+from app.providers.google_vision import GoogleVision
 from app.gpt.reasoner import build_prompt
 from app.utils_http import read_image_or_raise
 from app.cache_helpers import get_or_run
@@ -27,12 +28,13 @@ client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
 vision = AzureVision(AZURE_VISION_ENDPOINT, AZURE_VISION_KEY)
 aws = AWSRekognition(region_name=AWS_REGION)
+google = GoogleVision()
 
 # --- Cached runners ---
 RUNNERS: Dict[str, Callable[[bytes], VisionFinding]] = {
     "azure": lambda b: vision.analyze_image(b),
     "aws":   lambda b: aws.analyze_image(b),
-    # "google": lambda b: google.analyze_image(b),  # later
+    "google": lambda b: google.analyze_image(b),
 }
 
 # --- Pydantic models ---
@@ -45,6 +47,11 @@ class AWSOutput(BaseModel):
     alt_text: str
     tags: list[str]
     provider: str = "aws"
+
+class GoogleOutput(BaseModel):
+    alt_text: str
+    tags: list[str]
+    provider: str = "google"
 
 class ReasonInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -75,6 +82,7 @@ def health():
         "providers": {
             "azure": bool(os.getenv("AZURE_VISION_KEY") and os.getenv("AZURE_VISION_ENDPOINT")),
             "aws":   bool(os.getenv("AWS_REGION")),
+            "google": bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS")),
         },
         "model": OPENAI_MODEL,
         "version": "1.0.0",
@@ -88,7 +96,7 @@ async def analyze_azure(image: UploadFile = File(...)):
         f = get_or_run("azure", b, RUNNERS)
     except Exception as e:
         # redact details but keep a clear message
-        raise HTTPException(status_code=502, detail=f"AWS Rekognition error: {type(e).__name__}")
+        raise HTTPException(status_code=502, detail=f"Azure Vision error: {type(e).__name__}")
     return {"alt_text":f.caption, "tags":f.tags, "provider":"azure"}
 
 # --- AWS Rekognition endpoint ---
@@ -102,6 +110,15 @@ async def analyze_aws(image: UploadFile = File(...)):
         raise HTTPException(status_code=502, detail=f"AWS Rekognition error: {type(e).__name__}")
     return {"alt_text":f.caption, "tags":f.tags, "provider":"aws"}
 
+@app.post("/analyze-google", response_model=GoogleOutput)
+async def analyze_google(image: UploadFile = File(...)):
+    b = await read_image_or_raise(image)
+    try:
+        f = get_or_run("google", b, RUNNERS)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Google Vision error: {type(e).__name__}")
+    return {"alt_text": f.caption, "tags": f.tags, "provider": "google"}
+
 # --- Inspection endpoints for OCR + tags ---
 @app.post("/inspect-azure", response_model=InspectOutput)
 async def inspect_azure(image: UploadFile = File(...)):
@@ -110,7 +127,7 @@ async def inspect_azure(image: UploadFile = File(...)):
         f = get_or_run("azure", b, RUNNERS)
     except Exception as e:
         # redact details but keep a clear message
-        raise HTTPException(status_code=502, detail=f"AWS Rekognition error: {type(e).__name__}")
+        raise HTTPException(status_code=502, detail=f"Azure Vision error: {type(e).__name__}")
     return {
         "alt_text": f.caption,
         "tags": f.tags,
@@ -131,6 +148,20 @@ async def inspect_aws(image: UploadFile = File(...)):
         "tags": f.tags,
         "ocr_lines": f.ocr_lines,
         "provider": "aws",
+    }
+
+@app.post("/inspect-google", response_model=InspectOutput)
+async def inspect_google(image: UploadFile = File(...)):
+    b = await read_image_or_raise(image)
+    try:
+        f = get_or_run("google", b, RUNNERS)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Google Vision error: {type(e).__name__}")
+    return {
+        "alt_text": f.caption,
+        "tags": f.tags,
+        "ocr_lines": f.ocr_lines,
+        "provider": "google",
     }
 
 # -- GPT Reasoning endpoint ---

@@ -38,9 +38,11 @@ streamlit run ui/app.py
 ## Endpoints
 - POST /analyze-azure → { alt_text, tags, provider } : Uses Azure Image Analysis (caption + tags). alt_text is the Azure caption.
 - POST /analyze-aws → { alt_text, tags, provider } : Uses AWS Rekognition (labels → tags; text → OCR lines internally). alt_text is a simple label-based caption.
+- POST /analyze-google → { alt_text, tags, provider } : Uses Google Vision (labels → tags; Text Detection → OCR).
 - POST /reason → { alt_text, explain_why, tags, provider: "gpt" } : Refines alt text with GPT using your CV findings.
 - POST /inspect-azure → { alt_text, tags, ocr_lines, provider }
 - POST /inspect-aws → { alt_text, tags, ocr_lines, provider }
+- POST /inspect-google → { alt_text, tags, ocr_lines, provider }
 
 Convention: outward-facing JSON uses alt_text. The raw provider caption is used as a hint and exposed only via the /inspect-* endpoints for debugging.
 
@@ -57,10 +59,10 @@ alt-text-buddy/
 |  ├─ utils_http.py        # upload validation (content type / size)
 │  ├─ providers/
 │  │  ├─ __init__.py
-│  │  ├─ base.py           # VisionFinding dataclass
-│  │  ├─ azure_vision.py   # Azure Image Analysis adapter
+│  │  ├─ base.py            # VisionFinding dataclass
+│  │  ├─ azure_vision.py    # Azure Image Analysis adapter
 │  │  ├─ aws_rekognition.py # AWS Rekognition adapter
-│  │  └─ google_vision.py   # (stub/coming soon)
+│  │  └─ google_vision.py   # Google Vision adapter
 │  └─ gpt/
 │     ├─ __init__.py
 │     └─ reasoner.py       # prompt builder for GPT
@@ -89,9 +91,9 @@ alt-text-buddy/
   - OCR hit-rate (overlap between Azure READ text and alt text)
 
 ## Roadmap
-- ✅ Azure Image Analysis + GPT reasoning (this repo)
+- ✅ Azure Image Analysis + GPT reasoning
 - ✅ AWS Rekognition adapter (labels + text)
-- ⏩ Google Vision adapter (labels + text detection)
+- ✅ Google Vision adapter (labels + text detection)
 - ⏩ Sidebar metric pickers & weighted scoring
 - ⏩ One-shot /pipeline endpoint returning all provider results at once
 - ⏩ Download results (JSON/CSV) for batch evaluation
