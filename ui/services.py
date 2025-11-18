@@ -6,7 +6,12 @@ from typing import Dict, Any
 # Cache inspect per (api_base, provider, image-hash) for 5 minutes
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_inspect(api_base: str, provider: str, name: str, mime: str, img_bytes: bytes) -> Dict[str, Any] | None:
-    ep = "/inspect-azure" if provider == "azure" else "/inspect-aws"
+    ep_map = {
+        "azure": "/inspect-azure",
+        "aws":   "/inspect-aws",
+        "google": "/inspect-google",
+    }
+    ep = ep_map.get(provider)
     try:
         r = requests.post(f"{api_base.rstrip('/')}{ep}",
                           files={"image": (name, img_bytes, mime)}, timeout=60)
@@ -15,7 +20,12 @@ def fetch_inspect(api_base: str, provider: str, name: str, mime: str, img_bytes:
         return None
     
 def analyze(api_base: str, provider: str, name: str, mime: str, img_bytes: bytes) -> requests.Response:
-    ep = "/analyze-azure" if provider == "azure" else "/analyze-aws"
+    ep_map = {
+        "azure": "/analyze-azure",
+        "aws":   "/analyze-aws",
+        "google": "/analyze-google",
+    }
+    ep = ep_map.get(provider)
     return requests.post(f"{api_base.rstrip('/')}{ep}",
                          files={"image": (name, img_bytes, mime)}, timeout=90)
 

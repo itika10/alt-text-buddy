@@ -12,9 +12,9 @@ st.sidebar.header("API")
 API_BASE = st.sidebar.text_input("API base URL", "http://localhost:8000").rstrip("/")
 
 st.sidebar.header("Vision Providers")
-use_azure = st.sidebar.checkbox("Azure Vision", value=True)
+use_azure = st.sidebar.checkbox("Azure Vision", value=False)
 use_aws = st.sidebar.checkbox("AWS Rekognition", value=True)
-use_google = st.sidebar.checkbox("Google Vision", value=False)
+use_google = st.sidebar.checkbox("Google Vision", value=True)
 
 st.sidebar.header("Reasoning engine")
 use_gpt = st.sidebar.checkbox("Refine with GPT", value=True)
@@ -35,15 +35,28 @@ def run_provider(provider_id: str, title: str):
     with st.spinner(f"{title} analyzing…"):
         r = analyze(API_BASE, provider_id, file.name, file.type, img_bytes)
     if not r.ok:
-        st.error(f"{title} error: {r.status_code} - {r.text[:500]}")
+        try:
+            detail = r.json().get("detail")
+            if isinstance(detail, dict):
+                detail = detail.get("message") or str(detail)
+        except Exception:
+            detail = r.text[:500]
+        st.error(f"{title} error: {detail}")
         return
 
     out = r.json()
     st.session_state[f"{provider_id}_raw"] = out
     debug_dump(f"{title} raw response", out)
 
+    for k in [
+        "azure_raw", "azure_inspect", "azure_reasoned",
+        "aws_raw",   "aws_inspect",   "aws_reasoned",
+        "google_raw","google_inspect","google_reasoned",
+    ]:
+        st.session_state.pop(k, None)
+
     render_result(
-        title=title if provider_id == "azure" else "AWS Rekognition",
+        title=title,
         alt_text=out.get("alt_text",""),
         tags=out.get("tags", []),
     )
@@ -109,13 +122,9 @@ if file is not None:
         ]:
             st.session_state.pop(k, None)
 
-# ---- Cache /inspect per image ----
-def img_hash(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
 # ---- Generate button ----
 clicked = st.button("Generate", disabled=(file is None))
-if clicked and not (use_azure or use_aws):
+if clicked and not (use_azure or use_aws or use_google):
     st.warning("Select at least one provider on the left.")
 
 elif clicked and file and img_bytes:
@@ -123,3 +132,5 @@ elif clicked and file and img_bytes:
         run_provider("azure", "Azure (raw)")
     if use_aws:
         run_provider("aws", "AWS Rekognition")
+    if use_google:
+        run_provider("google", "Google Vision")
