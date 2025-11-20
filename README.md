@@ -1,5 +1,6 @@
 ## Alt-Text Buddy (Azure + GPT)
-Generate concise, high-quality alt text for images. Compare **raw Azure Image Analysis** vs **Azure + GPT reasoning** via a Streamlit UI and FastAPI backend.
+Generate concise, high-quality alt text for images. Compare Azure Vision, AWS Rekognition, and Google Vision side-by-side, and optionally refine each result with GPT. Streamlit UI + FastAPI backend.
+
 ![UI Screenshot](screenshots/ui.png)
 ---
 ![Docs Screenshot](screenshots/docs_endpoints.png)
@@ -36,15 +37,61 @@ streamlit run ui/app.py
 ```
 
 ## Endpoints
-- POST /analyze-azure → { alt_text, tags, provider } : Uses Azure Image Analysis (caption + tags). alt_text is the Azure caption.
-- POST /analyze-aws → { alt_text, tags, provider } : Uses AWS Rekognition (labels → tags; text → OCR lines internally). alt_text is a simple label-based caption.
-- POST /analyze-google → { alt_text, tags, provider } : Uses Google Vision (labels → tags; Text Detection → OCR).
+- POST /pipeline → { results: { <provider>: { raw: {...}, reasoned: {...|null} } } }
+  -- Runs one or more providers and (optionally) GPT reasoning for each.
+  -- Form fields:
+    - image: uploaded file (png/jpg/webp)
+    - providers: comma-separated list, any of azure,aws,google
+    - reason: true|false — refine with GPT
+    - use_case: web|ecommerce|news|education|docs
+    - tone: neutral|friendly|professional|informative
+    - max_len: integer (e.g., 160)
+  -- Response shape:
+    '''
+    {
+      "results": {
+        "azure": {
+          "raw": { "alt_text": "...", "tags": ["..."], "ocr_lines": ["..."], "provider": "azure" },
+          "reasoned": { "alt_text": "...", "explain_why": "...", "tags": ["..."], "provider": "gpt" }
+        },
+        "aws": {
+          "raw": { "alt_text": "...", "tags": ["..."], "ocr_lines": ["..."], "provider": "aws" },
+          "reasoned": null
+        },
+        "google": { "error": "SomeError: message..." }
+      }
+    }
+    '''
+  -- cURL
+  '''
+  curl -X POST "http://localhost:8000/pipeline" \
+    -F "image=@screenshots/ui.png" \
+    -F "providers=azure,aws,google" \
+    -F "reason=true" \
+    -F "use_case=web" \
+    -F "tone=neutral" \
+    -F "max_len=160"
+  '''
 - POST /reason → { alt_text, explain_why, tags, provider: "gpt" } : Refines alt text with GPT using your CV findings.
-- POST /inspect-azure → { alt_text, tags, ocr_lines, provider }
-- POST /inspect-aws → { alt_text, tags, ocr_lines, provider }
-- POST /inspect-google → { alt_text, tags, ocr_lines, provider }
+  -- Standalone GPT refinement
+  -- JSON body:
+    '''
+    {
+      "alt_text": "label-based caption or azure caption",
+      "tags": ["tag1", "tag2"],
+      "ocr_lines": ["line one", "line two"],
+      "use_case": "web",
+      "tone": "neutral",
+      "max_len": 160
+    }
+    '''
+  -- Response
+  '''
+  { "alt_text": "...", "explain_why": "...", "tags": ["..."], "provider": "gpt" }
 
-Convention: outward-facing JSON uses alt_text. The raw provider caption is used as a hint and exposed only via the /inspect-* endpoints for debugging.
+  '''
+
+Convention: outward-facing JSON uses alt_text. Provider captions are treated as hints and flow into GPT via /pipeline or /reason.
 
 ## Project structure
 ```
@@ -94,9 +141,10 @@ alt-text-buddy/
 - ✅ Azure Image Analysis + GPT reasoning
 - ✅ AWS Rekognition adapter (labels + text)
 - ✅ Google Vision adapter (labels + text detection)
-- ⏩ Sidebar metric pickers & weighted scoring
-- ⏩ One-shot /pipeline endpoint returning all provider results at once
-- ⏩ Download results (JSON/CSV) for batch evaluation
+- ✅ One-shot /pipeline endpoint returning all provider results at once
+- ⏩ Weighted/combined scoring across providers
+- ⏩ Batch evaluation & export (CSV/JSON)
+- ⏩ Optional prompt tuning & few-shot templates
 
 ## License
 

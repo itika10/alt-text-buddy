@@ -1,10 +1,10 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
 from typing import List, Optional, Dict, Callable
-import os, json
+import os, json, asyncio
 from openai import OpenAI
-from app.config import AZURE_VISION_ENDPOINT, AZURE_VISION_KEY, PORT, AWS_REGION
+from app.config import AZURE_VISION_ENDPOINT, AZURE_VISION_KEY, AWS_REGION
 from app.providers.base import VisionFinding
 from app.providers.azure_vision import AzureVision
 from app.providers.aws_rekognition import AWSRekognition
@@ -38,20 +38,6 @@ RUNNERS: Dict[str, Callable[[bytes], VisionFinding]] = {
 }
 
 # --- Pydantic models ---
-class AzureOutput(BaseModel):
-    alt_text: str
-    tags: list[str]
-    provider: str = "azure"
-
-class AWSOutput(BaseModel):
-    alt_text: str
-    tags: list[str]
-    provider: str = "aws"
-
-class GoogleOutput(BaseModel):
-    alt_text: str
-    tags: list[str]
-    provider: str = "google"
 
 class ReasonInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -69,100 +55,101 @@ class ReasonedOutput(BaseModel):
     tags: list[str]
     provider: str = "gpt"
 
-class InspectOutput(BaseModel):
+# --- Pipeline models ---
+class PipelineRaw(BaseModel):
     alt_text: str
     tags: list[str]
     ocr_lines: list[str]
     provider: str
+
+class PipelineReasoned(BaseModel):
+    alt_text: str
+    explain_why: str
+    tags: list[str]
+    provider: str = "gpt"
+
+class PipelineOut(BaseModel):
+    results: dict[str, dict]  # { provider_id: {"raw": PipelineRaw, "reasoned": PipelineReasoned | None} }
 
 @app.get("/health")
 def health():
     return {
         "ok": True,
         "providers": {
-            "azure": bool(os.getenv("AZURE_VISION_KEY") and os.getenv("AZURE_VISION_ENDPOINT")),
-            "aws":   bool(os.getenv("AWS_REGION")),
-            "google": bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS")),
+            "azure_configured": bool(os.getenv("AZURE_VISION_KEY") and os.getenv("AZURE_VISION_ENDPOINT")),
+            "aws_configured":   bool(os.getenv("AWS_REGION")),
+            "google_configured": bool(os.getenv("GOOGLE_APPLICATION_CREDENTIALS")),
         },
         "model": OPENAI_MODEL,
         "version": "1.0.0",
     }
 
-# --- Azure Vision endpoint ---
-@app.post("/analyze-azure", response_model=AzureOutput)
-async def analyze_azure(image: UploadFile = File(...)):
+# --- Pipeline endpoint ---
+@app.post("/pipeline", response_model=PipelineOut)
+async def pipeline(
+    image: UploadFile = File(...),
+    providers: str = Form("azure,aws,google"),
+    reason: bool = Form(False),
+    use_case: str = Form("web"),
+    tone: str = Form("neutral"),
+    max_len: int = Form(160),
+):
     b = await read_image_or_raise(image)
-    try:
-        f = get_or_run("azure", b, RUNNERS)
-    except Exception as e:
-        # redact details but keep a clear message
-        raise HTTPException(status_code=502, detail=f"Azure Vision error: {type(e).__name__}")
-    return {"alt_text":f.caption, "tags":f.tags, "provider":"azure"}
 
-# --- AWS Rekognition endpoint ---
-@app.post("/analyze-aws", response_model=AWSOutput)
-async def analyze_aws(image: UploadFile = File(...)):
-    b = await read_image_or_raise(image)
-    try:
-        f = get_or_run("aws", b, RUNNERS)
-    except Exception as e:
-        # redact details but keep a clear message
-        raise HTTPException(status_code=502, detail=f"AWS Rekognition error: {type(e).__name__}")
-    return {"alt_text":f.caption, "tags":f.tags, "provider":"aws"}
+    seen = set()
+    req = []
 
-@app.post("/analyze-google", response_model=GoogleOutput)
-async def analyze_google(image: UploadFile = File(...)):
-    b = await read_image_or_raise(image)
-    try:
-        f = get_or_run("google", b, RUNNERS)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Google Vision error: {type(e).__name__}")
-    return {"alt_text": f.caption, "tags": f.tags, "provider": "google"}
+    for p in (providers or "").split(","):
+        pid = p.strip().lower()
+        if pid in RUNNERS and pid not in seen:
+            seen.add(pid)
+            req.append(pid)
 
-# --- Inspection endpoints for OCR + tags ---
-@app.post("/inspect-azure", response_model=InspectOutput)
-async def inspect_azure(image: UploadFile = File(...)):
-    b = await read_image_or_raise(image)
-    try:
-        f = get_or_run("azure", b, RUNNERS)
-    except Exception as e:
-        # redact details but keep a clear message
-        raise HTTPException(status_code=502, detail=f"Azure Vision error: {type(e).__name__}")
-    return {
-        "alt_text": f.caption,
-        "tags": f.tags,
-        "ocr_lines": f.ocr_lines,
-        "provider": "azure",
-    }
+    if not req:
+        return {"results": {}}
+    
+    async def run_provider(pid: str):
+        try:
+            # Run CV provider via cache
+            finding = await asyncio.to_thread(get_or_run, pid, b, RUNNERS)
+            raw = PipelineRaw(
+                alt_text=finding.caption,
+                tags=finding.tags,
+                ocr_lines=finding.ocr_lines,
+                provider=pid,
+            )
 
-@app.post("/inspect-aws", response_model=InspectOutput)
-async def inspect_aws(image: UploadFile = File(...)):
-    b = await read_image_or_raise(image)
-    try:
-        f = get_or_run("aws", b, RUNNERS)
-    except Exception as e:
-        # redact details but keep a clear message
-        raise HTTPException(status_code=502, detail=f"AWS Rekognition error: {type(e).__name__}")
-    return {
-        "alt_text": f.caption,
-        "tags": f.tags,
-        "ocr_lines": f.ocr_lines,
-        "provider": "aws",
-    }
+            # Optionally reason
+            reasoned = None
+            if reason:
+                prompt = build_prompt(
+                    findings={"caption": raw.alt_text, "tags": raw.tags, "ocr_lines": raw.ocr_lines},
+                    use_case=use_case, tone=tone, max_len=max_len,
+                )
+                rsp = client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=0.2,
+                    response_format={"type": "json_object"},
+                )
+                try:
+                    data = json.loads(rsp.choices[0].message.content)
+                except Exception:
+                    data = {"alt_text": raw.alt_text, "explain_why": "", "tags": raw.tags}
 
-@app.post("/inspect-google", response_model=InspectOutput)
-async def inspect_google(image: UploadFile = File(...)):
-    b = await read_image_or_raise(image)
-    try:
-        f = get_or_run("google", b, RUNNERS)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Google Vision error: {type(e).__name__}")
-    return {
-        "alt_text": f.caption,
-        "tags": f.tags,
-        "ocr_lines": f.ocr_lines,
-        "provider": "google",
-    }
+                reasoned = PipelineReasoned(
+                    alt_text=data.get("alt_text", raw.alt_text),
+                    explain_why=data.get("explain_why", ""),
+                    tags=data.get("tags", raw.tags),
+                )
+            return pid, {"raw": raw.model_dump(), "reasoned": (reasoned.model_dump() if reasoned else None)}   
+        
+        except Exception as e:
+            # surface a per-provider error instead of failing the whole pipeline
+            return pid, {"error": f"{type(e).__name__}: {str(e)[:200]}"}
+
+    pairs = await asyncio.gather(*[run_provider(pid) for pid in req])
+    return {"results": dict(pairs)}
 
 # -- GPT Reasoning endpoint ---
 @app.post("/reason", response_model=ReasonedOutput)

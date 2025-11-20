@@ -2,7 +2,7 @@ import streamlit as st
 import requests, hashlib
 from components import render_result
 from metrics import compute_metrics, render_metrics
-from services import analyze, fetch_inspect, call_reasoner
+from services import call_pipeline
 
 st.set_page_config(page_title="Alt Text Buddy", page_icon="🖼️")
 st.title("Alt Text Buddy")
@@ -30,80 +30,6 @@ def debug_dump(title, payload):
         with st.expander(title):
             st.write(payload)
 
-def run_provider(provider_id: str, title: str):
-    # analyze
-    with st.spinner(f"{title} analyzing…"):
-        r = analyze(API_BASE, provider_id, file.name, file.type, img_bytes)
-    if not r.ok:
-        try:
-            detail = r.json().get("detail")
-            if isinstance(detail, dict):
-                detail = detail.get("message") or str(detail)
-        except Exception:
-            detail = r.text[:500]
-        st.error(f"{title} error: {detail}")
-        return
-
-    out = r.json()
-    st.session_state[f"{provider_id}_raw"] = out
-    debug_dump(f"{title} raw response", out)
-
-    for k in [
-        "azure_raw", "azure_inspect", "azure_reasoned",
-        "aws_raw",   "aws_inspect",   "aws_reasoned",
-        "google_raw","google_inspect","google_reasoned",
-    ]:
-        st.session_state.pop(k, None)
-
-    render_result(
-        title=title,
-        alt_text=out.get("alt_text",""),
-        tags=out.get("tags", []),
-    )
-
-    # inspect
-    insp = fetch_inspect(API_BASE, provider_id, file.name, file.type, img_bytes)
-    st.session_state[f"{provider_id}_inspect"] = insp
-    if insp:
-        debug_dump(f"{title} inspect", insp)
-        m = compute_metrics(
-            alt_text=out.get("alt_text",""),
-            tags=out.get("tags", []),
-            ocr_lines=insp.get("ocr_lines", []),
-        )
-        render_metrics("Metrics", m)
-
-    # reason (GPT)
-    if use_gpt:
-        rr = call_reasoner(
-            API_BASE,
-            alt_text=out.get("alt_text",""),
-            tags=out.get("tags", []),
-            ocr_lines=(insp or {}).get("ocr_lines", []),
-            use_case=use_case,
-            tone=tone,
-            max_len=max_len,
-        )
-        if rr.ok:
-            rout = rr.json()
-            st.session_state[f"{provider_id}_reasoned"] = rout
-            debug_dump(f"Reasoned (from {title.split()[0]})", rout)
-            render_result(
-                title=f"GPT reasoning based on {title} results",
-                alt_text=rout.get("alt_text",""),
-                tags=rout.get("tags", []),
-                explain_why=rout.get("explain_why",""),
-            )
-            if insp:
-                m = compute_metrics(
-                    alt_text=rout.get("alt_text",""),
-                    tags=rout.get("tags", []),
-                    ocr_lines=insp.get("ocr_lines", []),
-                )
-                render_metrics("Metrics", m)
-        else:
-            st.error(f"Reasoner ({title.split()[0]}) error: {rr.status_code} - {rr.text[:500]}")
-
 # ---- Main: file upload + preview ----
 file = st.file_uploader("Upload an image", type=["png","jpg","jpeg","webp"])
 img_bytes = None
@@ -119,6 +45,7 @@ if file is not None:
         for k in [
             "azure_raw", "azure_inspect", "azure_reasoned",
             "aws_raw",   "aws_inspect",   "aws_reasoned",
+            "google_raw","google_inspect","google_reasoned",
         ]:
             st.session_state.pop(k, None)
 
@@ -128,9 +55,56 @@ if clicked and not (use_azure or use_aws or use_google):
     st.warning("Select at least one provider on the left.")
 
 elif clicked and file and img_bytes:
-    if use_azure:
-        run_provider("azure", "Azure (raw)")
-    if use_aws:
-        run_provider("aws", "AWS Rekognition")
-    if use_google:
-        run_provider("google", "Google Vision")
+    selected = []
+    if use_azure: selected.append("azure")
+    if use_aws:   selected.append("aws")
+    if use_google: selected.append("google")
+
+    with st.spinner("Running providers…"):
+        r = call_pipeline(API_BASE, selected, file.name, file.type, img_bytes,
+                          reason=use_gpt, use_case=use_case, tone=tone, max_len=max_len)
+
+    if not r.ok:
+        try:
+            detail = r.json().get("detail")
+        except Exception:
+            detail = r.text[:500]
+        st.error(f"Pipeline error: {detail}")
+    else:
+        bundle = r.json().get("results", {})
+        title_map = {"azure": "Azure Vision", "aws": "AWS Rekognition", "google": "Google Vision"}
+        for pid, data in bundle.items():
+            title = title_map.get(pid, pid)
+
+            if isinstance(data, dict) and "error" in data:
+                st.error(f"{title} error: {data['error']}")
+                continue
+
+            raw = data.get("raw") or {}
+            reasoned = data.get("reasoned")
+
+            # Raw
+            debug_dump(f"{title} raw", raw)
+            render_result(title=f"{title} (raw)",
+                          alt_text=raw.get("alt_text",""),
+                          tags=raw.get("tags", []))
+            m = compute_metrics(
+                alt_text=raw.get("alt_text",""),
+                tags=raw.get("tags", []),
+                ocr_lines=(raw.get("ocr_lines") or []),
+            )
+            render_metrics("Metrics", m)
+
+            # Reasoned (if present)
+            if reasoned:
+                debug_dump(f"{title} reasoned", reasoned)
+                render_result(title=f"{title} + GPT",
+                              alt_text=reasoned.get("alt_text",""),
+                              tags=reasoned.get("tags", []),
+                              explain_why=reasoned.get("explain_why",""))
+                m2 = compute_metrics(
+                    alt_text=reasoned.get("alt_text",""),
+                    tags=reasoned.get("tags", []),
+                    ocr_lines=(raw.get("ocr_lines") or []),
+                )
+                render_metrics("Metrics (reasoned)", m2)
