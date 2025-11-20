@@ -1,5 +1,6 @@
-## Alt-Text Buddy (Azure + GPT)
-Generate concise, high-quality alt text for images. Compare **raw Azure Image Analysis** vs **Azure + GPT reasoning** via a Streamlit UI and FastAPI backend.
+## Alt-Text Buddy — Per-Provider Mode
+Compare Azure Vision, AWS Rekognition, and Google Vision outputs to generate alt text, with optional GPT refinement (Streamlit UI + FastAPI).
+
 ![UI Screenshot](screenshots/ui.png)
 ---
 ![Docs Screenshot](screenshots/docs_endpoints.png)
