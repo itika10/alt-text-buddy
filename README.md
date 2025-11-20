@@ -3,7 +3,7 @@ Compare Azure Vision, AWS Rekognition, and Google Vision outputs to generate alt
 
 ![UI Screenshot](screenshots/ui.png)
 ---
-![Docs Screenshot](screenshots/docs_endpoints.png)
+![Docs Screenshot](screenshots/endpoints_pipeline.png)
 ---
 
 ## Requirements
