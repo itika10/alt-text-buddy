@@ -2,19 +2,24 @@ from fastapi import FastAPI, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
 from typing import List, Optional, Dict, Callable
-import os, json, asyncio
+from dataclasses import asdict
+import os, json, asyncio, logging
 from openai import OpenAI
 from app.config import AZURE_VISION_ENDPOINT, AZURE_VISION_KEY, AWS_REGION
 from app.providers.base import VisionFinding
 from app.providers.azure_vision import AzureVision
 from app.providers.aws_rekognition import AWSRekognition
 from app.providers.google_vision import GoogleVision
+from app.metrics.token_usage import TokenUsage, cost_from_usage
 from app.gpt.reasoner import build_prompt
 from app.utils_http import read_image_or_raise
 from app.cache_helpers import get_or_run
 
 # --- FastAPI app setup ---
 app = FastAPI(title="Alt Text Buddy", version="1.0.0")
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
 app.add_middleware(
     CORSMiddleware,
@@ -26,6 +31,10 @@ app.add_middleware(
 # --- Initialize providers and clients ---
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+
+OPENAI_INPUT_PRICE_PER_1M_TOKENS = float(os.environ.get("OPENAI_INPUT_PRICE_PER_1M_TOKENS", "0.15"))
+OPENAI_OUTPUT_PRICE_PER_1M_TOKENS = float(os.environ.get("OPENAI_OUTPUT_PRICE_PER_1M_TOKENS", "0.60"))
+
 vision = AzureVision(AZURE_VISION_ENDPOINT, AZURE_VISION_KEY)
 aws = AWSRekognition(region_name=AWS_REGION)
 google = GoogleVision()
@@ -54,6 +63,8 @@ class ReasonedOutput(BaseModel):
     explain_why: str
     tags: list[str]
     provider: str = "gpt"
+    raw_caption: Optional[str] = None
+    llm_usage: Optional[dict] = None
 
 # --- Pipeline models ---
 class PipelineRaw(BaseModel):
@@ -132,6 +143,33 @@ async def pipeline(
                     temperature=0.2,
                     response_format={"type": "json_object"},
                 )
+
+                # --- Token + cost tracking (pipeline) ---
+                usage = getattr(rsp, "usage", None)
+                if usage is not None:
+                    input_tokens = getattr(usage, "prompt_tokens", 0)
+                    output_tokens = getattr(usage, "completion_tokens", 0)
+                    total_tokens = getattr(usage, "total_tokens", input_tokens + output_tokens)
+
+                    cost_usd = cost_from_usage(
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        input_price_per_1k=OPENAI_INPUT_PRICE_PER_1M_TOKENS,
+                        output_price_per_1k=OPENAI_OUTPUT_PRICE_PER_1M_TOKENS,
+                    )
+
+                    token_usage = TokenUsage(
+                        provider="openai",
+                        model=OPENAI_MODEL,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        total_tokens=total_tokens,
+                        cost_usd=cost_usd,
+                        context="single_reasoner",
+                    )
+
+                    logger.info(f"Token usage for provider '{pid}': {token_usage}")
+                    
                 try:
                     data = json.loads(rsp.choices[0].message.content)
                 except Exception:
@@ -173,6 +211,38 @@ async def reason(payload: ReasonInput):
         response_format={"type": "json_object"},
     )
 
+    # --- Token + cost tracking (single /reason endpoint) ---
+    llm_usage_dict = None
+    
+    usage = getattr(rsp, "usage", None)
+    if usage is not None:
+        input_tokens = getattr(usage, "prompt_tokens", 0)
+        output_tokens = getattr(usage, "completion_tokens", 0)
+        total_tokens = getattr(usage, "total_tokens", input_tokens + output_tokens)
+
+        cost_usd = cost_from_usage(
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            input_price_per_1k=OPENAI_INPUT_PRICE_PER_1M_TOKENS,
+            output_price_per_1k=OPENAI_OUTPUT_PRICE_PER_1M_TOKENS,
+        )
+
+        token_usage = TokenUsage(
+            provider="openai",
+            model=OPENAI_MODEL,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            cost_usd=cost_usd,
+            context="single_reasoner",
+        )
+        logger.info("Single /reason token usage: %s", token_usage)
+        logger.info(f"Token cost input: {OPENAI_INPUT_PRICE_PER_1M_TOKENS}")
+        logger.info (f"Token cost output: {OPENAI_OUTPUT_PRICE_PER_1M_TOKENS}")
+
+        # Make it JSON serializable
+        llm_usage_dict = asdict(token_usage)
+
     try:
         data = json.loads(rsp.choices[0].message.content)
     except (json.JSONDecodeError, AttributeError, IndexError):
@@ -187,4 +257,6 @@ async def reason(payload: ReasonInput):
         "explain_why": data.get("explain_why", ""),
         "tags": data.get("tags", payload.tags),
         "provider": "gpt",
+        "raw_caption": cap,
+        "llm_usage": llm_usage_dict,
     }
